@@ -9,7 +9,12 @@
 
 class SessionContextMocked : public upload::SessionContext {
  public:
-  SessionContextMocked() : num_jobs_dispatched_(0), num_jobs_finished_(0) {}
+  explicit SessionContextMocked(int delay = 0)
+      : delay_(delay),
+        num_jobs_dispatched_(0),
+        num_jobs_finished_(0) {}
+
+  int delay_;
 
   int num_jobs_dispatched_;
   int num_jobs_finished_;
@@ -27,6 +32,7 @@ class SessionContextMocked : public upload::SessionContext {
   }
 
   virtual bool DoUpload(const UploadJob* /*job*/) {
+    sleep(delay_);
     num_jobs_finished_++;
     return true;
   }
@@ -243,3 +249,30 @@ TEST_F(T_SessionContext, CurlUploadCallback) {
 
   EXPECT_EQ(payload_size, received_bytes);
 }
+
+TEST_F(T_SessionContext, SlowUpload) {
+  SessionContextMocked ctx(5);
+
+  EXPECT_TRUE(ctx.Initialize("http://my.repo.address:8080/api/v1",
+                             "/path/to/the/session_file", "some_key_id",
+                             "some_secret", 20000));
+  EXPECT_EQ(0, ctx.num_jobs_dispatched_);
+  EXPECT_EQ(0, ctx.num_jobs_finished_);
+
+  for (int i = 0; i < 10; ++i) {
+    ObjectPack::BucketHandle hd = ctx.NewBucket();
+
+    unsigned char buffer[4096];
+    memset(buffer, 0, 4096);
+    ObjectPack::AddToBucket(buffer, 4096, hd);
+
+    shash::Any hash(shash::kSha1);
+    EXPECT_TRUE(ctx.CommitBucket(ObjectPack::kCas, hash, hd, ""));
+  }
+  EXPECT_EQ(2, ctx.num_jobs_dispatched_);
+
+  ctx.WaitForUpload();
+
+  EXPECT_EQ(3, ctx.num_jobs_finished_);
+}
+

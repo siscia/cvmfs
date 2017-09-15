@@ -42,8 +42,7 @@ bool AbstractUploader::Initialize() {
   return thread_started_executing_.Get();
 }
 
-bool AbstractUploader::FinalizeSession(bool /*commit*/,
-                                       const std::string & /*old_root_hash*/,
+bool AbstractUploader::FinalizeSession(const std::string & /*old_root_hash*/,
                                        const std::string & /*new_root_hash*/) {
   return true;
 }

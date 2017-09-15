@@ -34,16 +34,16 @@ size_t RecvCB(void* buffer, size_t size, size_t nmemb, void* userp);
  * and uploaders are initialized and should last until the call to
  * Spooler::WaitForUpload().
  */
-class SessionContextBase {
+class SessionContext {
  public:
-  SessionContextBase();
+  SessionContext();
 
-  virtual ~SessionContextBase();
+  virtual ~SessionContext();
 
   bool Initialize(const std::string& api_url, const std::string& session_token,
                   const std::string& key_id, const std::string& secret,
                   uint64_t max_pack_size = ObjectPack::kDefaultLimit);
-  bool Finalize(bool commit, const std::string& old_root_hash,
+  bool Finalize(const std::string& old_root_hash,
                 const std::string& new_root_hash);
 
   void WaitForUpload();
@@ -56,17 +56,31 @@ class SessionContextBase {
                     const bool force_dispatch = false);
 
  protected:
-  virtual bool InitializeDerived() = 0;
-
-  virtual bool FinalizeDerived() = 0;
+  struct UploadJob {
+    ObjectPack* pack;
+    Future<bool>* result;
+  };
 
   virtual bool Commit(const std::string& old_root_hash,
-                      const std::string& new_root_hash) = 0;
+                      const std::string& new_root_hash);
 
-  virtual Future<bool>* DispatchObjectPack(ObjectPack* pack) = 0;
+  virtual Future<bool>* DispatchObjectPack(ObjectPack* pack);
 
-  int64_t NumJobsSubmitted() const;
+  virtual bool DoUpload(const SessionContext::UploadJob* job);
 
+ private:
+  void Dispatch();
+
+  static void* UploadLoop(void* data);
+
+  bool ShouldTerminate();
+
+  bool JobsPending() const;
+
+  void IncrementDispatchedJobs();
+  void IncrementFinishedJobs();
+
+  FifoChannel<UploadJob*> upload_jobs_;
   FifoChannel<Future<bool>*> upload_results_;
 
   std::string api_url_;
@@ -74,10 +88,8 @@ class SessionContextBase {
   std::string key_id_;
   std::string secret_;
 
-  FifoChannel<bool> queue_was_flushed_;
-
- private:
-  void Dispatch();
+  atomic_int32 worker_terminate_;
+  pthread_t worker_;
 
   uint64_t max_pack_size_;
 
@@ -86,41 +98,12 @@ class SessionContextBase {
   ObjectPack* current_pack_;
   pthread_mutex_t current_pack_mtx_;
 
-  mutable atomic_int64 objects_dispatched_;
+  uint64_t jobs_dispatched_;
+  uint64_t jobs_finished_;
+  mutable pthread_mutex_t job_counter_mtx_;
+
   uint64_t bytes_committed_;
   uint64_t bytes_dispatched_;
-};
-
-class SessionContext : public SessionContextBase {
- public:
-  SessionContext();
-
- protected:
-  struct UploadJob {
-    ObjectPack* pack;
-    Future<bool>* result;
-  };
-
-  virtual bool InitializeDerived();
-
-  virtual bool FinalizeDerived();
-
-  virtual bool Commit(const std::string& old_root_hash,
-                      const std::string& new_root_hash);
-
-  virtual Future<bool>* DispatchObjectPack(ObjectPack* pack);
-
-  virtual bool DoUpload(const UploadJob* job);
-
- private:
-  static void* UploadLoop(void* data);
-
-  bool ShouldTerminate();
-
-  FifoChannel<UploadJob*> upload_jobs_;
-
-  atomic_int32 worker_terminate_;
-  pthread_t worker_;
 };
 
 }  // namespace upload

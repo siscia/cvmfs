@@ -13,6 +13,26 @@
 #include "swissknife_lease_curl.h"
 #include "util/string.h"
 
+namespace {
+
+bool InitMutex(pthread_mutex_t* mtx) {
+  pthread_mutexattr_t attr;
+  if (pthread_mutexattr_init(&attr) ||
+      pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE) ||
+      pthread_mutex_init(mtx, &attr) ||
+      pthread_mutexattr_destroy(&attr)) {
+    return false;
+  }
+
+  return true;
+}
+
+uint64_t MaxQueueSize() {
+  return std::numeric_limits<uint64_t>::max();
+}
+
+}
+
 namespace upload {
 
 size_t SendCB(void* ptr, size_t size, size_t nmemb, void* userp) {
@@ -62,36 +82,41 @@ size_t RecvCB(void* buffer, size_t size, size_t nmemb, void* userp) {
   return my_buffer->size();
 }
 
-SessionContextBase::SessionContextBase()
-    : upload_results_(1000, 1000),
+SessionContext::SessionContext()
+    : upload_jobs_(MaxQueueSize(), MaxQueueSize()),
+      upload_results_(MaxQueueSize(), MaxQueueSize()),
       api_url_(),
       session_token_(),
       key_id_(),
       secret_(),
-      queue_was_flushed_(1, 1),
+      worker_terminate_(),
+      worker_(),
       max_pack_size_(ObjectPack::kDefaultLimit),
       active_handles_(),
       current_pack_(NULL),
       current_pack_mtx_(),
-      objects_dispatched_(0),
+      jobs_dispatched_(0),
+      jobs_finished_(0),
+      job_counter_mtx_(),
       bytes_committed_(0),
       bytes_dispatched_(0) {}
 
-SessionContextBase::~SessionContextBase() {}
+SessionContext::~SessionContext() {}
 
-bool SessionContextBase::Initialize(const std::string& api_url,
-                                    const std::string& session_token,
-                                    const std::string& key_id,
-                                    const std::string& secret,
-                                    uint64_t max_pack_size) {
+bool SessionContext::Initialize(const std::string& api_url,
+                                const std::string& session_token,
+                                const std::string& key_id,
+                                const std::string& secret,
+                                uint64_t max_pack_size) {
   bool ret = true;
 
   // Initialize session context lock
-  pthread_mutexattr_t attr;
-  if (pthread_mutexattr_init(&attr) ||
-      pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE) ||
-      pthread_mutex_init(&current_pack_mtx_, &attr) ||
-      pthread_mutexattr_destroy(&attr)) {
+  if (! InitMutex(&current_pack_mtx_)) {
+    LogCvmfs(kLogUploadGateway, kLogStderr,
+             "Could not initialize SessionContext lock.");
+    return false;
+  }
+  if (! InitMutex(&job_counter_mtx_)) {
     LogCvmfs(kLogUploadGateway, kLogStderr,
              "Could not initialize SessionContext lock.");
     return false;
@@ -104,15 +129,11 @@ bool SessionContextBase::Initialize(const std::string& api_url,
   secret_ = secret;
   max_pack_size_ = max_pack_size;
 
-  atomic_init64(&objects_dispatched_);
   bytes_committed_ = 0u;
   bytes_dispatched_ = 0u;
 
   // Ensure that the upload job and result queues are empty
   upload_results_.Drop();
-
-  queue_was_flushed_.Drop();
-  queue_was_flushed_.Enqueue(true);
 
   // Ensure that there are not open object packs
   if (current_pack_) {
@@ -122,13 +143,35 @@ bool SessionContextBase::Initialize(const std::string& api_url,
     ret = false;
   }
 
-  ret = InitializeDerived() && ret;
+  // Start worker thread
+  atomic_init32(&worker_terminate_);
+  atomic_write32(&worker_terminate_, 0);
 
-  return ret;
+  upload_jobs_.Drop();
+
+  int retval =
+      pthread_create(&worker_, NULL, UploadLoop, reinterpret_cast<void*>(this));
+
+  return !retval && ret;
 }
 
-bool SessionContextBase::Finalize(bool commit, const std::string& old_root_hash,
-                                  const std::string& new_root_hash) {
+bool SessionContext::Finalize(const std::string& old_root_hash,
+                              const std::string& new_root_hash) {
+  WaitForUpload();
+
+  bool results = Commit(old_root_hash, new_root_hash);
+
+  atomic_write32(&worker_terminate_, 1);
+
+  pthread_join(worker_, NULL);
+
+  results &= (bytes_committed_ == bytes_dispatched_);
+
+  pthread_mutex_destroy(&current_pack_mtx_);
+  return results;
+}
+
+void SessionContext::WaitForUpload() {
   assert(active_handles_.empty());
   {
     MutexLockGuard lock(current_pack_mtx_);
@@ -139,35 +182,17 @@ bool SessionContextBase::Finalize(bool commit, const std::string& old_root_hash,
     }
   }
 
-  bool results = true;
-  int64_t jobs_finished = 0;
-  while (!upload_results_.IsEmpty() || (jobs_finished < NumJobsSubmitted())) {
-    Future<bool>* future = upload_results_.Dequeue();
-    results = future->Get() && results;
-    delete future;
-    jobs_finished++;
-  }
-
-  if (commit) {
-    if (old_root_hash.empty() || new_root_hash.empty()) {
-      return false;
+  {
+    while (JobsPending()) {
+      Future<bool>* future = upload_results_.Dequeue();
+      future->Get();
+      delete future;
+      IncrementFinishedJobs();
     }
-    results &= Commit(old_root_hash, new_root_hash);
-  }
-
-  results &= FinalizeDerived() && (bytes_committed_ == bytes_dispatched_);
-
-  pthread_mutex_destroy(&current_pack_mtx_);
-  return results;
-}
-
-void SessionContextBase::WaitForUpload() {
-  if (!upload_results_.IsEmpty()) {
-    queue_was_flushed_.Dequeue();
   }
 }
 
-ObjectPack::BucketHandle SessionContextBase::NewBucket() {
+ObjectPack::BucketHandle SessionContext::NewBucket() {
   MutexLockGuard lock(current_pack_mtx_);
   if (!current_pack_) {
     current_pack_ = new ObjectPack(max_pack_size_);
@@ -177,11 +202,11 @@ ObjectPack::BucketHandle SessionContextBase::NewBucket() {
   return hd;
 }
 
-bool SessionContextBase::CommitBucket(const ObjectPack::BucketContentType type,
-                                      const shash::Any& id,
-                                      const ObjectPack::BucketHandle handle,
-                                      const std::string& name,
-                                      const bool force_dispatch) {
+bool SessionContext::CommitBucket(const ObjectPack::BucketContentType type,
+                                  const shash::Any& id,
+                                  const ObjectPack::BucketHandle handle,
+                                  const std::string& name,
+                                  const bool force_dispatch) {
   MutexLockGuard lock(current_pack_mtx_);
 
   if (!current_pack_) {
@@ -223,49 +248,6 @@ bool SessionContextBase::CommitBucket(const ObjectPack::BucketContentType type,
 
     CommitBucket(type, id, handle, name, false);
   }
-
-  return true;
-}
-
-int64_t SessionContextBase::NumJobsSubmitted() const {
-  return atomic_read64(&objects_dispatched_);
-}
-
-void SessionContextBase::Dispatch() {
-  MutexLockGuard lock(current_pack_mtx_);
-
-  if (!current_pack_) {
-    return;
-  }
-
-  atomic_inc64(&objects_dispatched_);
-  bytes_dispatched_ += current_pack_->size();
-  upload_results_.Enqueue(DispatchObjectPack(current_pack_));
-}
-
-SessionContext::SessionContext()
-    : SessionContextBase(),
-      upload_jobs_(1000, 900),
-      worker_terminate_(),
-      worker_() {}
-
-bool SessionContext::InitializeDerived() {
-  // Start worker thread
-  atomic_init32(&worker_terminate_);
-  atomic_write32(&worker_terminate_, 0);
-
-  upload_jobs_.Drop();
-
-  int retval =
-      pthread_create(&worker_, NULL, UploadLoop, reinterpret_cast<void*>(this));
-
-  return !retval;
-}
-
-bool SessionContext::FinalizeDerived() {
-  atomic_write32(&worker_terminate_, 1);
-
-  pthread_join(worker_, NULL);
 
   return true;
 }
@@ -366,12 +348,23 @@ bool SessionContext::DoUpload(const SessionContext::UploadJob* job) {
   return ok && !ret;
 }
 
+void SessionContext::Dispatch() {
+  MutexLockGuard lock(current_pack_mtx_);
+
+  if (!current_pack_) {
+    return;
+  }
+
+  IncrementDispatchedJobs();
+  bytes_dispatched_ += current_pack_->size();
+  upload_results_.Enqueue(DispatchObjectPack(current_pack_));
+}
+
 void* SessionContext::UploadLoop(void* data) {
   SessionContext* ctx = reinterpret_cast<SessionContext*>(data);
 
-  int64_t jobs_processed = 0;
   while (!ctx->ShouldTerminate()) {
-    while (jobs_processed < ctx->NumJobsSubmitted()) {
+    while (!ctx->upload_jobs_.IsEmpty()) {
       UploadJob* job = ctx->upload_jobs_.Dequeue();
       if (!ctx->DoUpload(job)) {
         LogCvmfs(kLogUploadGateway, kLogStderr,
@@ -381,10 +374,6 @@ void* SessionContext::UploadLoop(void* data) {
       job->result->Set(true);
       delete job->pack;
       delete job;
-      jobs_processed++;
-    }
-    if (ctx->queue_was_flushed_.IsEmpty()) {
-      ctx->queue_was_flushed_.Enqueue(true);
     }
   }
 
@@ -393,6 +382,24 @@ void* SessionContext::UploadLoop(void* data) {
 
 bool SessionContext::ShouldTerminate() {
   return atomic_read32(&worker_terminate_);
+}
+
+bool SessionContext::JobsPending() const {
+  MutexLockGuard lock(job_counter_mtx_);
+
+  return jobs_dispatched_ > jobs_finished_;
+}
+
+void SessionContext::IncrementDispatchedJobs() {
+  MutexLockGuard lock(job_counter_mtx_);
+
+  jobs_dispatched_++;
+}
+
+void SessionContext::IncrementFinishedJobs() {
+  MutexLockGuard lock(job_counter_mtx_);
+
+  jobs_finished_++;
 }
 
 }  // namespace upload

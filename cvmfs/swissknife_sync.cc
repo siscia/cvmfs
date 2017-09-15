@@ -749,7 +749,6 @@ int swissknife::CommandSync::Main(const swissknife::ArgumentList &args) {
   LogCvmfs(kLogCvmfs, kLogStdout, "Exporting repository manifest");
   params.spooler->WaitForUpload();
   spooler_catalogs->WaitForUpload();
-  params.spooler->FinalizeSession(false);
 
   // We call FinalizeSession(true) this time, to also trigger the commit
   // operation on the gateway machine (if the upstream is of type "gw").
@@ -757,7 +756,7 @@ int swissknife::CommandSync::Main(const swissknife::ArgumentList &args) {
   // Get the path of the new root catalog
   const std::string new_root_hash = manifest->catalog_hash().ToString(true);
 
-  spooler_catalogs->FinalizeSession(true, old_root_hash, new_root_hash);
+  spooler_catalogs->FinalizeSession(old_root_hash, new_root_hash);
   delete params.spooler;
 
   if (!manifest->Export(params.manifest_path)) {

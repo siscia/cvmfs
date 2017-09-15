@@ -88,7 +88,7 @@ bool GatewayUploader::Initialize() {
   }
 
   return session_context_->Initialize(config_.api_url, session_token, key_id,
-                                      secret);
+                                      secret, 50 * 1024 * 1024);
 }
 
 bool GatewayUploader::FinalizeSession(const std::string& old_root_hash,

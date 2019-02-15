@@ -65,6 +65,9 @@ if which go > /dev/null 2>&1; then
   if [ $go_minor -ge 11 ]; then
     if [ $go_patch -ge 4 ]; then
       build_ducc="ON"
+      echo "Building ducc in the following environment"
+      echo "$ go env"
+      go env
     fi
   fi
 fi

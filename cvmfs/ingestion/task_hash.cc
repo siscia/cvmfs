@@ -12,7 +12,6 @@
 #include "coz.h"
 
 void TaskHash::Process(BlockItem *input_block) {
-  COZ_PROGRESS_NAMED("HASH BEGIN");
   ChunkItem *chunk = input_block->chunk_item();
   assert(chunk != NULL);
 

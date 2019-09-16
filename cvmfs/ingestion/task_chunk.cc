@@ -22,7 +22,6 @@ atomic_int64 TaskChunk::tag_seq_ = 2 << 28;
  * to cut marks.  The output blocks correspond to chunks.
  */
 void TaskChunk::Process(BlockItem *input_block) {
-  COZ_PROGRESS_NAMED("CHUNK BEGIN");
   FileItem *file_item = input_block->file_item();
   int64_t input_tag = input_block->tag();
   assert((file_item != NULL) && (input_tag >= 0));

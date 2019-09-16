@@ -19,7 +19,6 @@
  * TODO(jblomer): avoid memory copy with EchoCompressor
  */
 void TaskCompress::Process(BlockItem *input_block) {
-  COZ_PROGRESS_NAMED("COMPRESS BEGIN");
   assert(input_block->chunk_item() != NULL);
 
   zlib::Compressor *compressor = input_block->chunk_item()->GetCompressor();

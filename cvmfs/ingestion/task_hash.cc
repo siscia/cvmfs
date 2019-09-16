@@ -9,8 +9,10 @@
 
 #include "hash.h"
 
+#include "coz.h"
 
 void TaskHash::Process(BlockItem *input_block) {
+  COZ_PROGRESS_NAMED("HASH BEGIN");
   ChunkItem *chunk = input_block->chunk_item();
   assert(chunk != NULL);
 
@@ -27,4 +29,5 @@ void TaskHash::Process(BlockItem *input_block) {
   }
 
   tubes_out_->Dispatch(input_block);
+  COZ_PROGRESS_NAMED("HASH END");
 }

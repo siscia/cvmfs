@@ -9,7 +9,10 @@
 
 #include "logging.h"
 
+#include "coz.h"
+
 void TaskRegister::Process(FileItem *file_item) {
+  COZ_PROGRESS_NAMED("REGISTER BEGIN");
   assert(file_item != NULL);
   assert(!file_item->path().empty());
   assert(!file_item->has_legacy_bulk_chunk() ||
@@ -34,4 +37,5 @@ void TaskRegister::Process(FileItem *file_item) {
 
   delete file_item;
   tube_counter_->Pop();
+  COZ_PROGRESS_NAMED("REGISTER END");
 }

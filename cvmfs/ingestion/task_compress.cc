@@ -11,6 +11,7 @@
 #include "logging.h"
 #include "smalloc.h"
 
+#include "coz.h"
 
 /**
  * The data payload of the blocks is replaced by their compressed counterparts.
@@ -18,6 +19,7 @@
  * TODO(jblomer): avoid memory copy with EchoCompressor
  */
 void TaskCompress::Process(BlockItem *input_block) {
+  COZ_PROGRESS_NAMED("COMPRESS BEGIN");
   assert(input_block->chunk_item() != NULL);
 
   zlib::Compressor *compressor = input_block->chunk_item()->GetCompressor();
@@ -75,4 +77,5 @@ void TaskCompress::Process(BlockItem *input_block) {
   }
 
   delete input_block;
+  COZ_PROGRESS_NAMED("COMPRESS END");
 }

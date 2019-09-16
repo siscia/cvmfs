@@ -16,11 +16,13 @@
 #include "smalloc.h"
 #include "util/posix.h"
 
+#include "coz.h"
 
 atomic_int64 TaskRead::tag_seq_ = 0;
 
 
 void TaskRead::Process(FileItem *item) {
+  COZ_PROGRESS_NAMED("READ BEGIN");
   BackoffThrottle throttle(kThrottleInitMs, kThrottleMaxMs, kThrottleResetMs);
   if ((high_watermark_ > 0) && (BlockItem::managed_bytes() > high_watermark_)) {
     atomic_inc64(&n_block_);
@@ -79,6 +81,7 @@ void TaskRead::Process(FileItem *item) {
       }
     }
   } while (nbytes > 0);
+  COZ_PROGRESS_NAMED("READ END");
 }
 
 

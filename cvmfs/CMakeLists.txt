@@ -602,6 +602,7 @@ set (CVMFS2_BINARY_LD_FLAGS "-ldl")
 set (CVMFS_FUSE_LD_FLAGS "-ldl -lm")
 set (CVMFS_STUB_LD_FLAGS "-ldl -lm")
 include_directories (cvmfs ${CMAKE_CURRENT_BINARY_DIR} ${INCLUDE_DIRECTORIES})
+include_directories ("/home/smosciat/coz/include")
 
 #
 # do the job!

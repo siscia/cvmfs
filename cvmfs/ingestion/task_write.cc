@@ -10,6 +10,7 @@
 #include "logging.h"
 #include "upload_facility.h"
 
+#include "coz.h"
 
 void TaskWrite::OnBlockComplete(
   const upload::UploaderResults &results,
@@ -48,6 +49,7 @@ void TaskWrite::OnChunkComplete(
 
 
 void TaskWrite::Process(BlockItem *input_block) {
+  COZ_PROGRESS_NAMED("WRITE BEGIN");
   ChunkItem *chunk_item = input_block->chunk_item();
 
   upload::UploadStreamHandle *handle = chunk_item->upload_handle();
@@ -82,4 +84,5 @@ void TaskWrite::Process(BlockItem *input_block) {
     default:
       abort();
   }
+  COZ_PROGRESS_NAMED("WRITE END");
 }

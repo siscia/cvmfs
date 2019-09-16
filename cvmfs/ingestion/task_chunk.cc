@@ -8,6 +8,8 @@
 
 #include "ingestion/task_chunk.h"
 
+#include "coz.h"
+
 /**
  * The tags from the read stage in the pipeline and the tags given in the
  * chunking stage can safely overlap.  Nevertheless, debugging might be easier
@@ -20,6 +22,7 @@ atomic_int64 TaskChunk::tag_seq_ = 2 << 28;
  * to cut marks.  The output blocks correspond to chunks.
  */
 void TaskChunk::Process(BlockItem *input_block) {
+  COZ_PROGRESS_NAMED("CHUNK BEGIN");
   FileItem *file_item = input_block->file_item();
   int64_t input_tag = input_block->tag();
   assert((file_item != NULL) && (input_tag >= 0));
@@ -154,4 +157,5 @@ void TaskChunk::Process(BlockItem *input_block) {
 
   delete input_block;
   if (output_block_bulk) tubes_out_->Dispatch(output_block_bulk);
+  COZ_PROGRESS_NAMED("CHUNK END");
 }

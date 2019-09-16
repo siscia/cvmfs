@@ -20,6 +20,8 @@
 #include "util/string.h"
 #include "util_concurrency.h"
 
+#include "coz.h"
+
 const uint64_t IngestionPipeline::kMaxPipelineMem = 1024 * 1024 * 1024;
 
 IngestionPipeline::IngestionPipeline(

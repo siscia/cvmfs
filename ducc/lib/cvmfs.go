@@ -304,7 +304,7 @@ func SaveLayersBacklink(CVMFSRepo string, img Image, layerDigest []string) error
 		llog(LogE(err)).Error("Error in publishing after adding the backlinks")
 		return err
 	}
-
+	RepositoryUpdated = true
 	return nil
 }
 

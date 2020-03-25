@@ -23,6 +23,8 @@ import (
 
 var NoPasswordError = 101
 
+var RepositoryUpdated = false
+
 type ConversionResult int
 
 const (
@@ -133,6 +135,8 @@ func ConvertWishSingularity(wish WishFriendly) (err error) {
 				if firstError == nil {
 					firstError = errF
 				}
+			} else {
+				RepositoryUpdated = true
 			}
 			continue
 		}
@@ -150,6 +154,8 @@ func ConvertWishSingularity(wish WishFriendly) (err error) {
 				if firstError == nil {
 					firstError = errF
 				}
+			} else {
+				RepositoryUpdated = true
 			}
 			continue
 		}
@@ -168,6 +174,8 @@ func ConvertWishSingularity(wish WishFriendly) (err error) {
 			firstError = err
 			os.RemoveAll(singularity.TempDirectory)
 			continue
+		} else {
+			RepositoryUpdated = true
 		}
 		os.RemoveAll(singularity.TempDirectory)
 	}
@@ -336,6 +344,7 @@ func convertInputOutput(inputImage, outputImage Image, repo string, convertAgain
 					cleanup(TrimCVMFSRepoPrefix(layerPath))
 					return
 				}
+				RepositoryUpdated = true
 				Log().WithFields(log.Fields{"layer": layer.Name}).Info("Finish Ingesting the file")
 			} else {
 				Log().WithFields(log.Fields{"layer": layer.Name}).Info("Skipping ingestion of layer, already exists")
@@ -443,6 +452,8 @@ func convertInputOutput(inputImage, outputImage Image, repo string, convertAgain
 		errIng := IngestIntoCVMFS(repo, manifestPath, <-manifestChanell)
 		if errIng != nil {
 			LogE(errIng).Error("Error in storing the manifest in the repository")
+		} else {
+			RepositoryUpdated = true
 		}
 		var errRemoveSchedule error
 		if alreadyConverted == ConversionNotMatch {

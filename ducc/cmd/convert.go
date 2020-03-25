@@ -84,5 +84,6 @@ var convertCmd = &cobra.Command{
 				}
 			}
 		}
+		lib.CreateAtlasTimestampLog(recipe.Wishes[0].CvmfsRepo)
 	},
 }

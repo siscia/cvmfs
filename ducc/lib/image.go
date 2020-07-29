@@ -528,8 +528,52 @@ func getLayerUrl(img *Image, layer da.Layer) string {
 }
 
 type downloadedLayer struct {
-	Name string
-	Path io.ReadCloser
+	Layer da.Layer
+	Name  string
+	Path  io.ReadCloser
+}
+
+func (img *Image) GetLayersCh(donce chan bool) <-chan da.Layer {
+	IdChan := make(chan da.Layer, 10)
+
+	go func() {
+		defer close(IdChan)
+		manifest, err := img.GetManifest()
+		if err != nil {
+			return
+		}
+
+		for _, layer := range manifest.Layers {
+			IdChan <- layer
+		}
+	}()
+	return IdChan
+}
+
+func (img *Image) LayersAreAllPresent() bool {
+	manifest, err := img.GetManifest()
+	if err != nil {
+		return false
+	}
+	var wg sync.WaitGroup
+	var m sync.Mutex
+	allPresent := true
+	for _, layer := range manifest.Layers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			layerDigest := strings.Split(layer.Digest, ":")[1]
+			layerPath := LayerRootfsPath(img.Repository, layerDigest)
+			_, err := os.Stat(layerPath)
+			if err != nil {
+				m.Lock()
+				defer m.Unlock()
+				allPresent = false
+			}
+		}()
+	}
+	wg.Wait()
+	return allPresent
 }
 
 func (img *Image) GetLayers(layersChan chan<- downloadedLayer, manifestChan chan<- string, stopGettingLayers <-chan bool, rootPath string) error {
@@ -627,15 +671,15 @@ func (img *Image) GetLayers(layersChan chan<- downloadedLayer, manifestChan chan
 }
 
 func (img *Image) downloadLayer(layer da.Layer, token, rootPath string) (toSend downloadedLayer, err error) {
-	user := img.User
-	pass, err := GetPassword()
-	if err != nil {
-		LogE(err).Warning("Unable to retrieve the password, trying to get the layers anonymously.")
-		user = ""
-		pass = ""
-	}
 	layerUrl := getLayerUrl(img, layer)
 	if token == "" {
+		user := img.User
+		pass, errPass := GetPassword()
+		if errPass != nil {
+			LogE(err).Warning("Unable to retrieve the password, trying to get the layers anonymously.")
+			user = ""
+			pass = ""
+		}
 		token, err = firstRequestForAuth(layerUrl, user, pass)
 		if err != nil {
 			return
@@ -662,7 +706,7 @@ func (img *Image) downloadLayer(layer da.Layer, token, rootPath string) (toSend 
 				continue
 			}
 
-			toSend = downloadedLayer{Name: layer.Digest, Path: gread}
+			toSend = downloadedLayer{Layer: layer, Name: layer.Digest, Path: gread}
 			return toSend, nil
 
 		} else {
@@ -671,7 +715,6 @@ func (img *Image) downloadLayer(layer da.Layer, token, rootPath string) (toSend 
 		}
 	}
 	return
-
 }
 
 func parseBearerToken(token string) (realm string, options map[string]string, err error) {

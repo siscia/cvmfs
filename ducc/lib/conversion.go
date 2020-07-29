@@ -174,6 +174,15 @@ func ConvertWishSingularity(wish WishFriendly) (err error) {
 	return firstError
 }
 
+type LayerConversion struct {
+	inputImage      *Image
+	outputImage     Image
+	cvmfsRepo       string
+	convertAgain    bool
+	forceDownload   bool
+	createThinImage bool
+}
+
 func ConvertWishDocker(wish WishFriendly, convertAgain, forceDownload, createThinImage bool) (err error) {
 
 	err = CreateCatalogIntoDir(wish.CvmfsRepo, subDirInsideRepo)
@@ -213,7 +222,8 @@ func ConvertWishDocker(wish WishFriendly, convertAgain, forceDownload, createThi
 		} else {
 			outputWithTag.Tag = outputImage.Tag
 		}
-		err = convertInputOutput(expandedImgTag, outputWithTag, wish.CvmfsRepo, convertAgain, forceDownload, createThinImage)
+		// lc = LayerConversion{inputImage: expandedImgTag, outputImage: outputWithTag, cvmfsRepo: wish.CvmfsRepo, convertAgain, forceDownload, createThinImage}
+		err = convertInputOutput(expandedImgTag, outputWithTag, wish.CvmfsRepo, convertAgain, forceDownload, createThinImage, false)
 		if err != nil && firstError == nil {
 			firstError = err
 		}
@@ -221,7 +231,120 @@ func ConvertWishDocker(wish WishFriendly, convertAgain, forceDownload, createThi
 	return firstError
 }
 
-func convertInputOutput(inputImage *Image, outputImage Image, repo string, convertAgain, forceDownload, createThinImage bool) (err error) {
+/// LayerRequests represents layers that we want in the storage
+type LayerRequest struct {
+	layer da.Layer
+	repo  string
+}
+
+// TODO
+// add logs
+// add subcatalogs
+func convertV2(inputImage *Image, repo string) error {
+	done := make(chan bool)
+	defer close(done)
+	layerDigest := inputImage.GetLayersCh(done)
+
+	layerRequest := func(done chan bool, layerDigestCh <-chan da.Layer) <-chan LayerRequest {
+		lr := make(chan LayerRequest, 10)
+		go func() {
+			defer close(lr)
+			for layer := range layerDigestCh {
+				select {
+				case lr <- LayerRequest{layer, repo}:
+				case <-done:
+					return
+				}
+			}
+		}()
+		return lr
+	}(done, layerDigest)
+
+	layerNeeded := func(done chan bool, layerRequestCh <-chan LayerRequest) <-chan LayerRequest {
+		ln := make(chan LayerRequest, 10)
+		go func() {
+			var wg sync.WaitGroup
+			defer close(ln)
+			defer wg.Wait()
+			for lr := range layerRequestCh {
+				wg.Add(1)
+				// make this run in parallel
+				go func() {
+					defer wg.Done()
+					// stat the FS, check if we really want the layer and if not move on
+					layerDigest := strings.Split(lr.layer.Digest, ":")[1]
+					layerPath := LayerRootfsPath(lr.repo, layerDigest)
+					_, err := os.Stat(layerPath)
+					if err == nil {
+						// if there is no error in stat the layer, the layer is already in the FS
+						return
+					}
+					select {
+					case ln <- lr:
+					case <-done:
+						return
+					}
+				}()
+			}
+		}()
+		return ln
+	}(done, layerRequest)
+
+	layerDownloaded := func(done chan bool, layerNeeded <-chan LayerRequest) <-chan downloadedLayer {
+		ld := make(chan downloadedLayer, 10)
+		go func() {
+			var wg sync.WaitGroup
+			defer close(ld)
+			defer wg.Wait()
+			var token string
+			for layer := range layerNeeded {
+				wg.Add(1)
+				// make this run in parallel
+				go func() {
+					defer wg.Done()
+					if token == "" {
+						user := inputImage.User
+						pass, err := GetPassword()
+						if err != nil {
+							user = ""
+							pass = ""
+						}
+						layerUrl := getLayerUrl(inputImage, layer.layer)
+						token, err = firstRequestForAuth(layerUrl, user, pass)
+						if err != nil {
+							return
+						}
+					}
+					toSend, err := inputImage.downloadLayer(layer.layer, token, "")
+					if err != nil {
+						return
+					}
+					select {
+					case ld <- toSend:
+					case <-done:
+						return
+					}
+				}()
+			}
+		}()
+		return ld
+	}(done, layerNeeded)
+
+	func(done chan bool, layerDownloadedCh <-chan downloadedLayer) {
+		for toIngest := range layerDownloadedCh {
+			layerDigest := strings.Split(toIngest.Layer.Digest, ":")[1]
+			layerPath := LayerRootfsPath(inputImage.Repository, layerDigest)
+			err := ExecCommand("cvmfs_server", "ingest", "--catalog", "-t", "-", "-b",
+				TrimCVMFSRepoPrefix(layerPath), repo).StdIn(toIngest.Path).Start()
+			if err != nil {
+			}
+		}
+	}(done, layerDownloaded)
+
+	return nil
+}
+
+func convertInputOutput(inputImage *Image, outputImage Image, repo string, convertAgain, forceDownload, createThinImage, checkAllLayers bool) (err error) {
 
 	manifest, err := inputImage.GetManifest()
 	if err != nil {
@@ -235,7 +358,13 @@ func convertInputOutput(inputImage *Image, outputImage Image, repo string, conve
 
 	if alreadyConverted == ConversionMatch {
 		if convertAgain == false {
-			return nil
+			if checkAllLayers {
+				if inputImage.LayersAreAllPresent() {
+					return nil
+				}
+			} else {
+				return nil
+			}
 		}
 	}
 
@@ -309,24 +438,21 @@ func convertInputOutput(inputImage *Image, outputImage Image, repo string, conve
 				// the layerfs directory, the one that host the
 				// whole layer
 
-				for _, dir := range []string{
-					filepath.Dir(filepath.Dir(TrimCVMFSRepoPrefix(layerPath))),
-					//TrimCVMFSRepoPrefix(layerPath)} {
-				} {
+				dir := filepath.Dir(filepath.Dir(TrimCVMFSRepoPrefix(layerPath)))
 
-					Log().WithFields(log.Fields{"catalogdirectory": dir}).Info("Working on CATALOGDIRECTORY")
-					err = CreateCatalogIntoDir(repo, dir)
-					if err != nil {
-						LogE(err).WithFields(log.Fields{
-							"directory": dir}).Error(
-							"Impossible to create subcatalog in super-directory.")
-					} else {
-						Log().WithFields(log.Fields{
-							"directory": dir}).Info(
-							"Created subcatalog in directory")
-					}
+				Log().WithFields(log.Fields{"catalogdirectory": dir}).Info("Working on CATALOGDIRECTORY")
+				err = CreateCatalogIntoDir(repo, dir)
+				if err != nil {
+					LogE(err).WithFields(log.Fields{
+						"directory": dir}).Error(
+						"Impossible to create subcatalog in super-directory.")
+				} else {
+					Log().WithFields(log.Fields{
+						"directory": dir}).Info(
+						"Created subcatalog in directory")
 				}
-				err = ExecCommand("cvmfs_server", "ingest", "--catalog", "-t", "-", "-b", TrimCVMFSRepoPrefix(layerPath), repo).StdIn(layer.Path).Start()
+				err = ExecCommand("cvmfs_server", "ingest", "--catalog", "-t", "-", "-b",
+					TrimCVMFSRepoPrefix(layerPath), repo).StdIn(layer.Path).Start()
 
 				if err != nil {
 					LogE(err).WithFields(log.Fields{"layer": layer.Name}).Error("Some error in ingest the layer")
@@ -338,14 +464,13 @@ func convertInputOutput(inputImage *Image, outputImage Image, repo string, conve
 			} else {
 				Log().WithFields(log.Fields{"layer": layer.Name}).Info("Skipping ingestion of layer, already exists")
 			}
-			//os.Remove(layer.Path)
 		}
 		Log().Info("Finished pushing the layers into CVMFS")
 	}()
 	// we create a temp directory for all the files needed, when this function finish we can remove the temp directory cleaning up
 	tmpDir, err := UserDefinedTempDir("", "conversion")
 	if err != nil {
-		LogE(err).Error("Error in creating a temporary direcotry for all the files")
+		LogE(err).Error("Error in creating a temporary directory for all the files")
 		return
 	}
 	defer os.RemoveAll(tmpDir)

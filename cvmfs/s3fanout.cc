@@ -91,6 +91,7 @@ static size_t CallbackCurlHeader(void *ptr, size_t size, size_t nmemb,
       info->http_error = String2Int64(string(&header_line[i], 3));
 
       switch (info->http_error) {
+        case 500:
         case 429:
           info->error_code = kFailRetry;
           info->throttle_ms = S3FanoutManager::kDefault429ThrottleMs;

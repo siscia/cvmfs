@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -662,7 +663,7 @@ func (img *Image) GetLayers(layersChan chan<- downloadedLayer, manifestChan chan
 	}
 }
 
-func (img *Image) downloadLayer(layer da.Layer, token string) (toSend downloadedLayer, err error) {
+func (img *Image) downloadLayer(layer da.Layer, token string) (toSend io.ReadCloser, err error) {
 	user := img.User
 	pass, err := GetPassword()
 	if err != nil {
@@ -702,9 +703,7 @@ func (img *Image) downloadLayer(layer da.Layer, token string) (toSend downloaded
 				l.LogE(err).Warning("Error in creating the zip to unzip the layer")
 				continue
 			}
-			path := NewReadAndHash(gread)
-			toSend = newDownloadedLayer(layer.Digest, path)
-			return toSend, nil
+			return gread, nil
 		} else {
 			err = fmt.Errorf("Layer not received, status code: %d", resp.StatusCode)
 			l.LogE(err).Warning("Received status code ", resp.StatusCode)
@@ -796,6 +795,7 @@ type LayerDownloader struct {
 	token    string
 	attempts map[string]int
 	lock     sync.Mutex
+	cache    map[string]*os.File
 }
 
 func NewLayerDownloader(image *Image) LayerDownloader {
@@ -840,20 +840,21 @@ func (ld *LayerDownloader) DownloadLayer(layer da.Layer) (downloadedLayer, error
 	ld.attempts[layer.Digest] = (att + 1)
 	ld.lock.Unlock()
 
+	readCloser, err := ld.image.downloadLayer(layer, token)
+	if err != nil {
+		return downloadedLayer{}, err
+	}
 	// if the layer is bigger than 50M we download it using the disk storage
 	if att == 0 && layer.Size < 50e6 {
 		// in this case it is smaller and we do an early exit
-		return ld.image.downloadLayer(layer, token)
+		readAndHash := NewReadAndHash(readCloser)
+		return newDownloadedLayer(layer.Digest, readAndHash), nil
 	}
-	inMem, err := ld.image.downloadLayer(layer, token)
+	r, err := NewDiskBufferReadAndHash(readCloser)
 	if err != nil {
-		return inMem, err
+		return downloadedLayer{}, err
 	}
-	r, err := NewDiskBufferReadAndHash(inMem.Path)
-	if err != nil {
-		return inMem, err
-	}
-	return newDownloadedLayer(inMem.Name, r), nil
+	return newDownloadedLayer(layer.Digest, r), nil
 }
 
 func (ld *LayerDownloader) DownloadAndIngest(CVMFSRepo string, layer da.Layer) error {
@@ -953,6 +954,10 @@ func (img *Image) CreateSneakyChainStructure(CVMFSRepo string) (err error, lastC
 			previous = chainIDs[i-1].String()
 		}
 		layer := manifest.Layers[i]
+
+		// we are downloading the layer sequentialy
+		// it is a rather big waste of time
+		// this should somehow be fixed
 		downloadLayer := func() error {
 			// we need to get the layer tar reader here
 			layerStream, err := ld.DownloadLayer(layer)

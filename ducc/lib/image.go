@@ -26,6 +26,7 @@ import (
 	da "github.com/cvmfs/ducc/docker-api"
 	l "github.com/cvmfs/ducc/log"
 	notification "github.com/cvmfs/ducc/notification"
+	temp "github.com/cvmfs/ducc/temp"
 )
 
 type ManifestRequest struct {
@@ -791,11 +792,12 @@ func requestAuthToken(token, user, pass string) (authToken string, err error) {
 }
 
 type LayerDownloader struct {
-	image    *Image
-	token    string
-	attempts map[string]int
-	lock     sync.Mutex
-	cache    map[string]*os.File
+	image       *Image
+	token       string
+	attempts    map[string]int
+	lock        sync.Mutex
+	prefetch    map[string]*os.File
+	downloading map[string]*sync.WaitGroup
 }
 
 func NewLayerDownloader(image *Image) LayerDownloader {
@@ -831,6 +833,12 @@ func (ld *LayerDownloader) getToken() (token string, err error) {
 }
 
 func (ld *LayerDownloader) DownloadLayer(layer da.Layer) (downloadedLayer, error) {
+
+	if r, err := ld.checkInCache(layer); err == nil {
+		readAndHash := NewReadAndHash(r)
+		return newDownloadedLayer(layer.Digest, readAndHash), nil
+	}
+
 	token, err := ld.getToken()
 	if err != nil {
 		return downloadedLayer{}, err
@@ -855,6 +863,69 @@ func (ld *LayerDownloader) DownloadLayer(layer da.Layer) (downloadedLayer, error
 		return downloadedLayer{}, err
 	}
 	return newDownloadedLayer(layer.Digest, r), nil
+}
+
+func (ld *LayerDownloader) Prefetch(layer da.Layer) error {
+	ld.lock.Lock()
+	wg := ld.downloading[layer.Digest]
+	ld.lock.Unlock()
+	if wg != nil {
+		wg.Wait()
+	}
+	ld.lock.Lock()
+	if _, ok := ld.prefetch[layer.Digest]; ok == true {
+		ld.lock.Unlock()
+		return nil
+	}
+	wg = &sync.WaitGroup{}
+	wg.Add(1)
+	ld.downloading[layer.Digest] = wg
+	defer wg.Done()
+	ld.lock.Unlock()
+
+	token, err := ld.getToken()
+	if err != nil {
+		return err
+	}
+	// the file is not there
+	// we can create a file on disk and populate it
+	f, err := temp.UserDefinedTempFile()
+	if err != nil {
+		os.RemoveAll(f.Name())
+		return err
+	}
+	readCloser, err := ld.image.downloadLayer(layer, token)
+	if err != nil {
+		os.RemoveAll(f.Name())
+		return err
+	}
+	if _, err := io.Copy(f, readCloser); err != nil {
+		os.RemoveAll(f.Name())
+		return err
+	}
+	ld.lock.Lock()
+	ld.prefetch[layer.Digest] = f
+	ld.lock.Unlock()
+	return nil
+}
+
+func (ld *LayerDownloader) checkInCache(layer da.Layer) (io.ReadCloser, error) {
+	ld.lock.Lock()
+	defer ld.lock.Unlock()
+	if wg, ok := ld.downloading[layer.Digest]; ok == true {
+		ld.lock.Unlock()
+		wg.Wait()
+		ld.lock.Lock()
+	}
+	f := ld.prefetch[layer.Digest]
+	if f == nil {
+		return f, fmt.Errorf("Layer is not being prefetched")
+	}
+	f1, err := os.Open(f.Name())
+	if err != nil {
+		return f, err
+	}
+	return f1, nil
 }
 
 func (ld *LayerDownloader) DownloadAndIngest(CVMFSRepo string, layer da.Layer) error {

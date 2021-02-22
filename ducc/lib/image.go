@@ -520,19 +520,19 @@ func getLayerUrl(img *Image, layerDigest string) string {
 }
 
 type downloadedLayer struct {
-	Name string
-	Path ReadHashCloseSizer
+	Name    string
+	Content ReadHashCloseSizer
 }
 
 func newDownloadedLayer(name string, path ReadHashCloseSizer) downloadedLayer {
-	return downloadedLayer{Name: name, Path: path}
+	return downloadedLayer{Name: name, Content: path}
 }
 
 func (d *downloadedLayer) Close() error {
 	// sometimes we might be forced to return the zero value of downloadedLayer
 	// in that case Path will point to nil
-	if d.Path != nil {
-		return d.Path.Close()
+	if d.Content != nil {
+		return d.Content.Close()
 	}
 	return nil
 }
@@ -547,7 +547,7 @@ func (d *downloadedLayer) IngestIntoCVMFS(CVMFSRepo string) error {
 	superDir := filepath.Dir(filepath.Dir(cvmfs.TrimCVMFSRepoPrefix(layerPath)))
 	go cvmfs.CreateCatalogIntoDir(CVMFSRepo, superDir)
 	ingestPath := cvmfs.TrimCVMFSRepoPrefix(layerPath)
-	err := cvmfs.Ingest(CVMFSRepo, d.Path,
+	err := cvmfs.Ingest(CVMFSRepo, d.Content,
 		"--catalog", "-t", "-",
 		"-b", ingestPath)
 	if err != nil {
@@ -557,7 +557,7 @@ func (d *downloadedLayer) IngestIntoCVMFS(CVMFSRepo string) error {
 		go cvmfs.IngestDelete(CVMFSRepo, ingestPath)
 		return err
 	}
-	err = StoreLayerInfo(CVMFSRepo, layerDigest, d.Path)
+	err = StoreLayerInfo(CVMFSRepo, layerDigest, d.Content)
 	if err != nil {
 		return err
 	}
@@ -566,8 +566,8 @@ func (d *downloadedLayer) IngestIntoCVMFS(CVMFSRepo string) error {
 
 // only accurate at the END
 func (d *downloadedLayer) GetSize() int64 {
-	if d.Path != nil {
-		return d.Path.GetSize()
+	if d.Content != nil {
+		return d.Content.GetSize()
 	}
 	return 0
 }
@@ -970,7 +970,7 @@ func (img *Image) CreateSneakyChainStructure(CVMFSRepo string) (err error, lastC
 				return err
 			}
 
-			tarReader := *tar.NewReader(layerStream.Path)
+			tarReader := *tar.NewReader(layerStream.Content)
 
 			chainN := n.AddField("chain", chain.String()).
 				AddField("layer", strings.Split(layer.Digest, ":")[1]).

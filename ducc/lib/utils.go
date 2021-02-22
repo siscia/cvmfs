@@ -7,11 +7,7 @@ import (
 	"encoding/base64"
 	"hash"
 	"io"
-	"os"
 	"strings"
-
-	l "github.com/cvmfs/ducc/log"
-	temp "github.com/cvmfs/ducc/temp"
 )
 
 type ReadHashCloseSizer interface {
@@ -20,47 +16,6 @@ type ReadHashCloseSizer interface {
 	io.Closer
 
 	GetSize() int64
-}
-
-type OnDiskReadAndHash struct {
-	*ReadAndHash
-
-	path string
-}
-
-// this structure is useful, but each time we use this, we are hogging up the netowrk
-// we force to download all the layer, and **then** we check if the layer is already in CVMFS
-// this can be optimize
-// the constructor, this function, should be smarter.
-// it could return immediately while starting a goroutine that does the real downloading and copy work
-// on Read we block until the goroutine has not finished
-// we still use a lot of network, but we don't wait for it.
-// To avoid using the network, on Close() we could close the request body
-func NewOnDiskReadAndHash(r io.ReadCloser) (*OnDiskReadAndHash, error) {
-	defer r.Close()
-	f, err := temp.UserDefinedTempFile()
-	if err != nil {
-		os.RemoveAll(f.Name())
-		return &OnDiskReadAndHash{}, err
-	}
-	if _, err = io.Copy(f, r); err != nil {
-		os.RemoveAll(f.Name())
-		return &OnDiskReadAndHash{}, err
-	}
-	if _, err := f.Seek(0, 0); err != nil {
-		os.RemoveAll(f.Name())
-		return &OnDiskReadAndHash{}, err
-	}
-	l.Log().Info("Done downloading")
-	readAndHash := NewReadAndHash(f)
-	return &OnDiskReadAndHash{ReadAndHash: readAndHash, path: f.Name()}, nil
-}
-
-func (r *OnDiskReadAndHash) Close() error {
-	if err := os.RemoveAll(r.path); err != nil {
-		return err
-	}
-	return r.ReadAndHash.Close()
 }
 
 //encapsulates io.ReadCloser, with functionality to calculate hash and size of the content
